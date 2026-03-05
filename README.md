@@ -90,3 +90,21 @@ sudo systemctl start telegram-monitor
 - 建议使用 `systemd` 托管（示例见 `telegram-monitor.service.example`），已配置 `Restart=always`，进程异常退出会自动重启。
 - 本版本已增强 `Ctrl+C`/`SIGTERM` 处理，正常可快速退出。
 - 若你观察到只有健康检查日志，请先把 `runtime.log_level` 设为 `DEBUG`，可看到 `poll_cycle`（公开轮询周期）或 `processed_*`（消息处理）日志。
+
+
+## 如何校验“最后一条消息拿不到”
+
+新增了诊断脚本：`scripts/validate_public_tail.py`，用于对比公开列表页和单条详情页，定位到底是“源页面没更新”还是“监控逻辑漏掉了最后一条”。
+
+```bash
+python3 scripts/validate_public_tail.py https://t.me/s/journey_of_someone --sample 5
+```
+
+输出重点字段：
+- `latest_from_list`: 列表页能看到的最新消息 ID
+- `latest_detail_available`: 该 ID 的详情页是否可访问
+- `possible_truncated`: 列表页文本是否比详情页短（可能被截断）
+
+判定建议：
+- 若 `latest_detail_available=true` 且脚本可看到最新 ID，但主程序日志没有对应 `processed_*`，说明是主程序逻辑问题。
+- 若列表页和详情页都看不到最新消息，多数是 Telegram Web 公开页更新延迟/缓存/限流，不是你的程序单独问题。
