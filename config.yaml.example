@@ -1,0 +1,23 @@
+telegram:
+  api_id: 123456
+  api_hash: "YOUR_API_HASH_HERE"
+  phone_number: "+8613800000000"
+  twofa_password: ""
+  session_path: "data/telethon.session"
+
+channels:
+  targets:
+    - "@channelname"
+    - "https://t.me/channelname"
+
+notify:
+  serverchan_sendkey: "YOUR_SENDKEY_HERE"
+  title_prefix: "[投机之路监控]"
+  max_text_len: 200
+
+runtime:
+  log_level: "INFO"
+  state_db_path: "data/state.sqlite"
+  backfill_limit: 50
+  dedup_window_days: 7
+  healthcheck_interval_sec: 60

@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Channel Monitor (Telethon + ServerChan)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/py_pdf
+ExecStart=/usr/bin/python3 /opt/py_pdf/main.py
+Restart=always
+RestartSec=5
+User=www-data
+Group=www-data
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
