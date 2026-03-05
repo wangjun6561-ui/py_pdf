@@ -83,3 +83,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable telegram-monitor
 sudo systemctl start telegram-monitor
 ```
+
+
+## Linux 稳定运行建议
+
+- 建议使用 `systemd` 托管（示例见 `telegram-monitor.service.example`），已配置 `Restart=always`，进程异常退出会自动重启。
+- 本版本已增强 `Ctrl+C`/`SIGTERM` 处理，正常可快速退出。
+- 若你观察到只有健康检查日志，请先把 `runtime.log_level` 设为 `DEBUG`，可看到 `poll_cycle`（公开轮询周期）或 `processed_*`（消息处理）日志。
