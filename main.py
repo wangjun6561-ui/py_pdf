@@ -72,6 +72,10 @@ def media_type_of(msg: Message) -> str:
     return "other"
 
 
+def effective_fetch_limit(config: AppConfig) -> int:
+    return max(1, min(5, int(config.runtime.backfill_limit)))
+
+
 class MonitorService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -229,11 +233,11 @@ class MonitorService:
                 target.entity,
                 min_id=last_message_id,
                 reverse=True,
-                limit=self.config.runtime.backfill_limit,
+                limit=effective_fetch_limit(self.config),
             ):
                 messages.append(msg)
         else:
-            async for msg in self.client.iter_messages(target.entity, limit=self.config.runtime.backfill_limit):
+            async for msg in self.client.iter_messages(target.entity, limit=effective_fetch_limit(self.config)):
                 messages.append(msg)
             messages.reverse()
 
@@ -252,7 +256,7 @@ class MonitorService:
 
     async def _backfill_channel_public(self, target: ChannelTarget) -> None:
         last_message_id = self.state.get_last_message_id(target.key)
-        fetched = await asyncio.to_thread(self._fetch_public_messages, target.username, self.config.runtime.backfill_limit)
+        fetched = await asyncio.to_thread(self._fetch_public_messages, target.username, effective_fetch_limit(self.config))
         messages = sorted(fetched, key=lambda x: x.message_id)
         for item in messages:
             if last_message_id is not None and item.message_id <= last_message_id:
@@ -326,8 +330,11 @@ class MonitorService:
                 )
                 return
 
-            max_len = self.config.notify.max_text_len
-            summary = text[:max_len] + ("..." if len(text) > max_len else "")
+            max_len = int(self.config.notify.max_text_len)
+            if max_len > 0:
+                summary = text[:max_len] + ("..." if len(text) > max_len else "")
+            else:
+                summary = text
             title = "{0}{1}".format(self.config.notify.title_prefix, target.display_name)
             desp = (
                 "- 时间: {0}\n"
@@ -391,7 +398,7 @@ class MonitorService:
 
     async def _poll_one_public_target(self, target: ChannelTarget) -> None:
         last_message_id = self.state.get_last_message_id(target.key)
-        fetched = await asyncio.to_thread(self._fetch_public_messages, target.username, self.config.runtime.backfill_limit)
+        fetched = await asyncio.to_thread(self._fetch_public_messages, target.username, effective_fetch_limit(self.config))
         messages = sorted(fetched, key=lambda x: x.message_id)
         for item in messages:
             if last_message_id is not None and item.message_id <= last_message_id:
@@ -439,7 +446,37 @@ class MonitorService:
             return []
 
         results.sort(key=lambda x: x.message_id)
-        return results[-max(1, limit):]
+        tail = results[-max(1, limit):]
+
+        enriched: List[PublicMessage] = []
+        for item in tail:
+            full_text = self._fetch_public_message_detail_text(username, item.message_id)
+            enriched.append(
+                PublicMessage(
+                    message_id=item.message_id,
+                    text=full_text if full_text else item.text,
+                    media_type=item.media_type,
+                    link=item.link,
+                    date_text=item.date_text,
+                )
+            )
+
+        return enriched
+
+    def _fetch_public_message_detail_text(self, username: str, message_id: int) -> str:
+        try:
+            url = "https://t.me/{0}/{1}".format(username, message_id)
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            text_elem = soup.select_one("div.tgme_widget_message_text")
+            return text_elem.get_text("\n", strip=True) if text_elem else ""
+        except Exception:
+            logger.debug(
+                "单条消息详情抓取失败，使用列表页文本",
+                extra={"action": "public_detail_fetch_failed", "channel": "@{0}".format(username), "message_id": message_id},
+            )
+            return ""
 
     async def _healthcheck_loop(self) -> None:
         interval = max(10, self.config.runtime.healthcheck_interval_sec)
