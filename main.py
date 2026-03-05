@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, RpcError
+from telethon.errors import FloodWaitError, RPCError
 from telethon.tl.types import Channel, Message
 
 from config import AppConfig, can_use_telethon, load_config
@@ -80,6 +80,7 @@ class MonitorService:
         self._stop_event = asyncio.Event()
         self.channel_targets: Dict[str, ChannelTarget] = {}
         self.channel_targets_by_id: Dict[int, ChannelTarget] = {}
+        self.channel_locks: Dict[str, asyncio.Lock] = {}
         self.client: Optional[TelegramClient] = None
         self.use_telethon = can_use_telethon(config.telegram)
 
@@ -117,10 +118,7 @@ class MonitorService:
 
         stop_wait_task = asyncio.create_task(self._stop_event.wait())
         disconnected_task = asyncio.create_task(self.client.run_until_disconnected())
-        done, pending = await asyncio.wait(
-            [stop_wait_task, disconnected_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        done, pending = await asyncio.wait([stop_wait_task, disconnected_task], return_when=asyncio.FIRST_COMPLETED)
 
         for task in pending:
             task.cancel()
@@ -152,7 +150,7 @@ class MonitorService:
         code = input("请输入 Telegram 验证码: ").strip()
         try:
             await self.client.sign_in(self.config.telegram.phone_number, code)
-        except RpcError:
+        except RPCError:
             if self.config.telegram.twofa_password:
                 await self.client.sign_in(password=self.config.telegram.twofa_password)
             else:
@@ -182,10 +180,8 @@ class MonitorService:
                 )
                 self.channel_targets[key] = target
                 self.channel_targets_by_id[int(entity.id)] = target
-                logger.info(
-                    "已解析频道",
-                    extra={"action": "resolve_target", "target": raw, "channel": display_name},
-                )
+                self.channel_locks.setdefault(key, asyncio.Lock())
+                logger.info("已解析频道", extra={"action": "resolve_target", "target": raw, "channel": display_name})
             return
 
         for raw in self.config.channels.targets:
@@ -201,10 +197,8 @@ class MonitorService:
                 entity=None,
                 entity_id=None,
             )
-            logger.info(
-                "已解析公开频道",
-                extra={"action": "resolve_target_public", "target": raw, "channel": display_name},
-            )
+            self.channel_locks.setdefault(key, asyncio.Lock())
+            logger.info("已解析公开频道", extra={"action": "resolve_target_public", "target": raw, "channel": display_name})
 
     async def _run_backfill(self) -> None:
         if self.use_telethon and self.client is not None:
@@ -212,19 +206,13 @@ class MonitorService:
                 try:
                     await self._backfill_channel_telethon(target)
                 except Exception:
-                    logger.exception(
-                        "补偿拉取失败",
-                        extra={"action": "backfill_error", "channel": target.display_name},
-                    )
+                    logger.exception("补偿拉取失败", extra={"action": "backfill_error", "channel": target.display_name})
         else:
             for target in self.channel_targets.values():
                 try:
                     await self._backfill_channel_public(target)
                 except Exception:
-                    logger.exception(
-                        "公开频道补偿拉取失败",
-                        extra={"action": "backfill_public_error", "channel": target.display_name},
-                    )
+                    logger.exception("公开频道补偿拉取失败", extra={"action": "backfill_public_error", "channel": target.display_name})
 
         removed = self.state.cleanup_dedup(self.config.runtime.dedup_window_days)
         logger.info("去重窗口清理完成", extra={"action": "dedup_cleanup", "message_id": removed})
@@ -264,11 +252,7 @@ class MonitorService:
 
     async def _backfill_channel_public(self, target: ChannelTarget) -> None:
         last_message_id = self.state.get_last_message_id(target.key)
-        fetched = await asyncio.to_thread(
-            self._fetch_public_messages,
-            target.username,
-            self.config.runtime.backfill_limit,
-        )
+        fetched = await asyncio.to_thread(self._fetch_public_messages, target.username, self.config.runtime.backfill_limit)
         messages = sorted(fetched, key=lambda x: x.message_id)
         for item in messages:
             if last_message_id is not None and item.message_id <= last_message_id:
@@ -325,40 +309,57 @@ class MonitorService:
         msg_time: str,
         source: str,
     ) -> None:
-        if self.state.is_processed(target.key, message_id):
-            logger.debug(
-                "消息已处理，跳过",
-                extra={"action": "dedup_skip", "channel": target.display_name, "message_id": message_id},
+        lock = self.channel_locks.setdefault(target.key, asyncio.Lock())
+        async with lock:
+            last_message_id = self.state.get_last_message_id(target.key)
+            if last_message_id is not None and message_id <= last_message_id:
+                logger.debug(
+                    "消息ID不大于游标，跳过",
+                    extra={"action": "cursor_skip", "channel": target.display_name, "message_id": message_id},
+                )
+                return
+
+            if self.state.is_processed(target.key, message_id):
+                logger.debug(
+                    "消息已处理，跳过",
+                    extra={"action": "dedup_skip", "channel": target.display_name, "message_id": message_id},
+                )
+                return
+
+            max_len = self.config.notify.max_text_len
+            summary = text[:max_len] + ("..." if len(text) > max_len else "")
+            title = "{0}{1}".format(self.config.notify.title_prefix, target.display_name)
+            desp = (
+                "- 时间: {0}\n"
+                "- 频道: {1}\n"
+                "- 消息ID: {2}\n"
+                "- 媒体类型: {3}\n"
+                "- 链接: {4}\n\n"
+                "摘要:\n{5}"
+            ).format(msg_time, target.display_name, message_id, media_type, link, summary if summary else "(无文本)")
+
+            sent = await self._send_notification(title, desp, target.display_name, message_id)
+            if not sent:
+                logger.error(
+                    "通知发送失败，保留未处理状态等待下次重试",
+                    extra={"action": "notify_giveup", "channel": target.display_name, "message_id": message_id},
+                )
+                return
+
+            self.state.mark_processed(target.key, message_id)
+            self.state.update_cursor(target.key, message_id)
+            logger.info(
+                "消息处理完成",
+                extra={"action": "processed_{0}".format(source), "channel": target.display_name, "message_id": message_id},
             )
-            return
 
-        max_len = self.config.notify.max_text_len
-        summary = text[:max_len] + ("..." if len(text) > max_len else "")
-        title = "{0}{1}".format(self.config.notify.title_prefix, target.display_name)
-        desp = (
-            "- 时间: {0}\n"
-            "- 频道: {1}\n"
-            "- 消息ID: {2}\n"
-            "- 媒体类型: {3}\n"
-            "- 链接: {4}\n\n"
-            "摘要:\n{5}"
-        ).format(msg_time, target.display_name, message_id, media_type, link, summary if summary else "(无文本)")
-
-        await self._send_notification(title, desp, target.display_name, message_id)
-        self.state.mark_processed(target.key, message_id)
-        self.state.update_cursor(target.key, message_id)
-        logger.info(
-            "消息处理完成",
-            extra={"action": "processed_{0}".format(source), "channel": target.display_name, "message_id": message_id},
-        )
-
-    async def _send_notification(self, title: str, desp: str, channel: str, message_id: int) -> None:
+    async def _send_notification(self, title: str, desp: str, channel: str, message_id: int) -> bool:
         max_retry = 3
         for attempt in range(1, max_retry + 1):
             try:
                 ok = await asyncio.to_thread(self.notifier.send, title, desp)
                 if ok:
-                    return
+                    return True
             except Exception:
                 logger.exception(
                     "通知发送异常",
@@ -371,6 +372,7 @@ class MonitorService:
                 extra={"action": "notify_retry", "channel": channel, "message_id": message_id},
             )
             await asyncio.sleep(wait)
+        return False
 
     async def _poll_public_loop(self) -> None:
         interval = max(5, self.config.runtime.public_poll_interval_sec)
@@ -379,10 +381,7 @@ class MonitorService:
                 try:
                     await self._poll_one_public_target(target)
                 except Exception:
-                    logger.exception(
-                        "公开频道轮询失败",
-                        extra={"action": "poll_error", "channel": target.display_name},
-                    )
+                    logger.exception("公开频道轮询失败", extra={"action": "poll_error", "channel": target.display_name})
 
             logger.debug("公开频道轮询周期完成", extra={"action": "poll_cycle"})
             try:
@@ -392,24 +391,12 @@ class MonitorService:
 
     async def _poll_one_public_target(self, target: ChannelTarget) -> None:
         last_message_id = self.state.get_last_message_id(target.key)
-        fetched = await asyncio.to_thread(
-            self._fetch_public_messages,
-            target.username,
-            self.config.runtime.backfill_limit,
-        )
+        fetched = await asyncio.to_thread(self._fetch_public_messages, target.username, self.config.runtime.backfill_limit)
         messages = sorted(fetched, key=lambda x: x.message_id)
         for item in messages:
             if last_message_id is not None and item.message_id <= last_message_id:
                 continue
-            await self._process_message(
-                target,
-                item.message_id,
-                item.text,
-                item.media_type,
-                item.link,
-                item.date_text,
-                "poll",
-            )
+            await self._process_message(target, item.message_id, item.text, item.media_type, item.link, item.date_text, "poll")
             last_message_id = item.message_id
 
     def _fetch_public_messages(self, username: Optional[str], limit: int) -> List[PublicMessage]:
@@ -448,6 +435,10 @@ class MonitorService:
             link = build_link(username, message_id)
             results.append(PublicMessage(message_id, text, media_type, link, date_text))
 
+        if not results:
+            return []
+
+        results.sort(key=lambda x: x.message_id)
         return results[-max(1, limit):]
 
     async def _healthcheck_loop(self) -> None:
@@ -487,7 +478,7 @@ async def run_with_retry(service: MonitorService) -> None:
             wait = int(exc.seconds)
             logger.warning("触发 FloodWait，等待后重试: %ss", wait, extra={"action": "flood_wait"})
             await asyncio.sleep(wait)
-        except (ConnectionError, OSError, RpcError, requests.RequestException):
+        except (ConnectionError, OSError, RPCError, requests.RequestException):
             logger.exception("网络/Telegram错误，指数退避重连", extra={"action": "reconnect"})
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60)
