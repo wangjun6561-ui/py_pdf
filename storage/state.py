@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 
 class StateStore:
@@ -63,7 +63,7 @@ class StateStore:
                 (channel_key, message_id, now),
             )
 
-    def get_last_message_id(self, channel_key: str) -> int | None:
+    def get_last_message_id(self, channel_key: str) -> Optional[int]:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT last_message_id FROM channel_cursor WHERE channel_key = ?",
@@ -91,4 +91,4 @@ class StateStore:
                 "DELETE FROM processed_messages WHERE processed_at < ?",
                 (threshold,),
             )
-            return cur.rowcount
+            return int(cur.rowcount)

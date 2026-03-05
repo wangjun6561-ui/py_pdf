@@ -1,6 +1,11 @@
 # Telegram 公开频道监控（Telethon + Server酱）
 
-本项目使用 **Telethon (MTProto)** 监听一个或多个 Telegram 公开频道，并在新消息出现时通过 **Server酱** 推送通知。
+支持两种运行模式：
+
+1. **Telethon 模式（推荐）**：需要 `api_id/api_hash/phone_number`，事件驱动，实时性更高。
+2. **公开频道免登录模式**：当你暂时拿不到 `api_id/api_hash` 时，程序自动轮询 `https://t.me/s/<channel>` 页面，不需要 Telegram 登录。
+
+> 说明：Telegram 官方 MTProto 监听必须依赖 `api_id/api_hash`。免登录模式是工程兜底方案，属于网页轮询，不是 MTProto 实时订阅。
 
 ## 目录结构
 
@@ -8,63 +13,57 @@
 .
 ├── config.py
 ├── config.yaml.example
-├── data/                         # 运行时目录（session / sqlite）
+├── data/
 ├── Dockerfile
 ├── main.py
 ├── notifier
-│   └── serverchan_send.py        # vendored Server酱发送器
+│   └── serverchan_send.py
 ├── requirements.txt
 ├── storage
-│   └── state.py                  # 去重与游标状态
+│   └── state.py
 ├── telegram-monitor.service.example
 └── utils
-    └── logging.py                # JSON 结构化日志
+    └── logging.py
 ```
 
-## 快速开始（本机运行）
+## Python 版本
 
-1. 安装依赖
+- 兼容 **Python 3.9+**（已移除 `dataclass(slots=True)` 与 3.10 专属类型语法）。
+
+## 快速开始
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-2. 配置文件
-
-```bash
 cp config.yaml.example config.yaml
-```
-
-编辑 `config.yaml`，填入：
-- `telegram.api_id`
-- `telegram.api_hash`
-- `telegram.phone_number`
-- `telegram.twofa_password`（如无可留空）
-- `notify.serverchan_sendkey`
-- `channels.targets`
-
-3. 启动
-
-```bash
 python main.py
 ```
 
-首次运行会触发登录流程：
-- 程序发送 Telegram 验证码到你的账号。
-- 终端输入验证码。
-- 如账号开启二步验证，程序会使用 `twofa_password` 完成登录。
-- 登录成功后会在 `telegram.session_path` 保存 session 文件；后续自动登录。
+## 配置说明
 
-## 可靠性设计
+- `telegram.api_id/api_hash/phone_number` 全部配置后：走 Telethon 模式。
+- 若缺少其中任意项：自动切换公开频道免登录轮询模式。
+- `channels.targets` 支持：
+  - `@channelname`
+  - `https://t.me/channelname`
+  - `https://t.me/s/channelname`
 
-- **事件驱动监听**：`events.NewMessage` 监听目标频道。
-- **去重**：`processed_messages(channel_key, message_id)` 避免重复通知。
-- **断线补偿**：启动时按 `backfill_limit` + `channel_cursor` 补拉未处理消息。
-- **指数退避**：通知失败与 Telegram 连接异常均有重试与退避。
-- **优雅退出**：捕获 `SIGINT`/`SIGTERM`，关闭 Telethon client。
-- **结构化日志**：JSON 日志，包含 `action/channel/message_id` 字段。
+关键配置：
+
+- `runtime.backfill_limit`：启动补偿拉取条数。
+- `runtime.dedup_window_days`：去重历史保留天数。
+- `runtime.public_poll_interval_sec`：公开频道轮询间隔。
+
+## 可靠性
+
+- SQLite 去重表：`processed_messages`
+- 频道游标表：`channel_cursor`
+- 启动 backfill 补偿
+- 失败重试 + 指数退避
+- 结构化 JSON 日志
+- `SIGINT/SIGTERM` 优雅退出
+- Windows 兼容：`add_signal_handler` 不可用时自动跳过
 
 ## Docker（可选）
 
@@ -76,27 +75,11 @@ docker run --rm -it \
   tg-monitor
 ```
 
-> 注意：首次登录需要交互输入验证码，请使用 `-it`。
-
 ## systemd（可选）
-
-1. 复制服务文件：
 
 ```bash
 sudo cp telegram-monitor.service.example /etc/systemd/system/telegram-monitor.service
-```
-
-2. 按需修改：
-- `WorkingDirectory`
-- `ExecStart`
-- `User/Group`
-
-3. 启用并启动：
-
-```bash
 sudo systemctl daemon-reload
 sudo systemctl enable telegram-monitor
 sudo systemctl start telegram-monitor
-sudo systemctl status telegram-monitor
 ```
-

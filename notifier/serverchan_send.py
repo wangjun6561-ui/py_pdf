@@ -9,7 +9,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
+@dataclass
 class ServerChanNotifier:
     sendkey: str
     timeout_sec: int = 10
@@ -20,7 +20,7 @@ class ServerChanNotifier:
             logger.error("Server酱 SendKey 未配置，跳过发送", extra={"action": "notify_skip"})
             return False
 
-        url = f"https://sctapi.ftqq.com/{self.sendkey}.send"
+        url = "https://sctapi.ftqq.com/{0}.send".format(self.sendkey)
         data = {"title": title, "desp": desp}
 
         for attempt in range(1, self.retry_times + 2):
@@ -31,17 +31,10 @@ class ServerChanNotifier:
                 if payload.get("code") == 0:
                     logger.info("Server酱发送成功", extra={"action": "notify_success"})
                     return True
-                logger.error(
-                    "Server酱返回非成功状态: %s",
-                    payload,
-                    extra={"action": "notify_failed"},
-                )
+                logger.error("Server酱返回非成功状态: %s", payload, extra={"action": "notify_failed"})
             except Exception:
-                logger.exception(
-                    "Server酱发送异常 (attempt=%s)",
-                    attempt,
-                    extra={"action": "notify_error"},
-                )
+                logger.exception("Server酱发送异常 (attempt=%s)", attempt, extra={"action": "notify_error"})
+
             if attempt < self.retry_times + 1:
                 time.sleep(2 ** (attempt - 1))
 
