@@ -1,0 +1,25 @@
+telegram:
+  # 若要使用 Telethon 事件驱动，请填写以下3项并完成首次登录
+  api_id: 0
+  api_hash: ""
+  phone_number: ""
+  twofa_password: ""
+  session_path: "data/telethon.session"
+
+channels:
+  targets:
+    - "@journey_of_someone"
+    - "https://t.me/s/journey_of_someone"
+
+notify:
+  serverchan_sendkey: "YOUR_SENDKEY_HERE"
+  title_prefix: "[投机之路监控]"
+  max_text_len: 200
+
+runtime:
+  log_level: "INFO"
+  state_db_path: "data/state.sqlite"
+  backfill_limit: 50
+  dedup_window_days: 7
+  healthcheck_interval_sec: 60
+  public_poll_interval_sec: 15
